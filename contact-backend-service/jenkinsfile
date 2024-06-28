@@ -1,0 +1,134 @@
+pipeline {
+    agent any
+    tools {
+      jdk "jdk21"
+    }
+
+    environment {
+            DOCKER_IMAGE = 'contact_backend:v2'
+            DOCKER_REGISTRY = 'imenmz/contact_backend:v2'
+            DOCKER_REGISTRY_CREDENTIALS = 'docker_credentials' // Jenkins credentials ID
+            DOCKERHUB_CREDENTIALS_USR = 'imenmz'
+    }
+
+
+    stages {
+        stage('version controle') {
+           steps {
+             sh 'java --version && mvn --version'
+             sh 'echo $JAVA_HOME'
+          }
+        }
+        stage('Checkout Backend Code') {
+            steps {
+                dir('backend') {
+                    script {
+                        git branch: params.BRANCHE, url: 'https://github.com/maazounimen/contact-backend-service.git'
+                    }
+                }
+            }
+        }
+
+        stage('Checkout Code && Build Maven') {
+            steps {
+                script{
+                    switch(params.BRANCHE){
+                        case "main": sh "mvn clean package";break
+                        case "stage": sh "mvn clean package";break
+                    }
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    def scannerHome = tool name: 'sonar_scanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
+                    withSonarQubeEnv('sonar_server') {
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                            -Dsonar.projectKey=contact-backend-service \
+                            -Dsonar.sources=src/main/java \
+                            -Dsonar.java.binaries=target/classes \
+                            -Dsonar.tests=src/test/java \
+                            -Dsonar.test.inclusions="**/*Test*.java" \
+                            -Dsonar.junit.reportPaths=target/surefire-reports
+                        """
+                    }
+                }
+            }
+        }
+
+        stage("Nexus") {
+            steps {
+                nexusArtifactUploader artifacts:
+                        		[[
+                        			artifactId: 'contact-backend-service',
+                        			classifier: '',
+                        			file: 'target/contact-backend-service-0.0.1-SNAPSHOT.jar',
+                        			type: 'jar'
+                        		]],
+                        		credentialsId: 'nexus_pwd',
+                        		groupId: 'org.m2i',
+                        		nexusUrl: '192.168.1.134:8081',
+                        		nexusVersion: 'nexus3',
+                        		protocol: 'http',
+                        		repository: 'contact-backend-service',
+                        		version: '$BUILD_ID -$BUILD_TIMESTAMP'
+            }
+        }
+
+
+        stage('Build Docker Image') {
+                        steps {
+                            script {
+                                sh 'docker build -t ${DOCKER_REGISTRY} .'
+                            }
+                        }
+        }
+
+        stage('Tag and Push Docker Image') {
+                 steps {
+                     script {
+                         sh 'docker tag ${DOCKER_REGISTRY} ${DOCKER_REGISTRY}'
+                         sh 'docker login -u ${DOCKERHUB_CREDENTIALS_USR} -p ${DOCKER_REGISTRY_CREDENTIALS}'
+                         sh 'docker push ${DOCKER_REGISTRY}'
+                     }
+                 }
+        }
+
+        stage('Deploy') {
+                steps {
+                    script {
+                            // Pull the image from Docker registry and deploy it
+                            sh '''
+                            docker pull ${DOCKER_REGISTRY}
+                            docker run -p 8083:8083 ${DOCKER_REGISTRY}
+                            '''
+                    }
+                }
+        }
+
+
+
+
+    }
+
+        post {
+            always {
+                // Cleanup Docker environment
+                script {
+                    sh 'docker system prune -f'
+                }
+            }
+            success {
+                echo 'Deployment completed successfully'
+            }
+            failure {
+                echo 'Deployment failed'
+            }
+        }
+
+    }
+
+
